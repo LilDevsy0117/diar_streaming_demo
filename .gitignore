@@ -1,0 +1,9 @@
+# Optional local cache
+sample_infer_cache/
+
+__pycache__/
+*.py[cod]
+.Python
+.venv/
+venv/
+.env
