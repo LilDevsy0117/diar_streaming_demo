@@ -1,3 +1,10 @@
+# Install PyTorch for your OS and CUDA/CPU *before* NeMo (see https://pytorch.org/get-started/locally/).
+# Example CPU-only:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+#
+# NeMo pulls numpy, omegaconf, etc. Use a supported Python (3.10–3.12 typical for recent NeMo).
+
 fastapi>=0.100.0
 uvicorn[standard]>=0.22.0
 PyYAML>=6.0
+nemo_toolkit[asr]>=2.0.0

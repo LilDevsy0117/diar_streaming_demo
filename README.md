@@ -8,69 +8,88 @@ Browser microphone → WebSocket → NeMo Sortformer streaming diarization. **Th
 
 The **segment log** (right) lists finalized speech intervals per speaker as `start : end` (seconds), using the same per-channel `ts_vad_post_processing` + merge step as NeMo Sortformer RTTM-style output (see `demo_service.py` comments). Heatmaps show raw streaming probabilities.
 
-## Prerequisites
+## Quick start
 
-1. **Repository layout**  
-   This folder (`diar_streaming_demo`) should sit next to a sibling **NeMo** source tree. `demo_service.py` reads post-processing YAML from `../NeMo/examples/speaker_tasks/diarization/conf/post_processing/`.
+1. **Python** — use a version supported by your `nemo_toolkit` wheel (often **3.10–3.12**).
 
-2. **Python environment**  
-   Install NeMo and hardware-appropriate dependencies, then add the demo packages:
+2. **PyTorch** — install **before** NeMo, matching CPU or CUDA: [pytorch.org](https://pytorch.org/get-started/locally/).
 
    ```bash
+   # Example: CPU-only
+   pip install torch --index-url https://download.pytorch.org/whl/cpu
+   ```
+
+3. **This repo + NeMo ASR stack**
+
+   ```bash
+   git clone https://github.com/LilDevsy0117/diar_streaming_demo.git
+   cd diar_streaming_demo
    pip install -r requirements.txt
    ```
 
-3. **Hugging Face**  
-   Default checkpoints are loaded from the Hub via `from_pretrained`.
-
-   - Interactive: `huggingface-cli login` or `hf auth login`
-   - Servers / CI: set `HF_TOKEN` or `HUGGING_FACE_HUB_TOKEN`
-   - For gated models, accept the terms on the Hub with the same account you use for login.
-
-4. **Temporary directory (`TMPDIR`)**  
-   Unpacking `.nemo` archives may need a large temp area.  
-   If you do not set `TMPDIR` and **`/mnt/data` exists**, the server sets `TMPDIR=/mnt/data/tmp/diar_streaming_demo` automatically. On other machines, set it yourself if needed:
+4. **Hugging Face** — default checkpoints load from the Hub.
 
    ```bash
-   export TMPDIR=/path/to/large/tmp
+   huggingface-cli login
+   # or: export HF_TOKEN=...
    ```
 
-## Default models (registry)
+5. **Run** — use CPU if you have no GPU or a driver/PyTorch CUDA mismatch:
+
+   ```bash
+   python server.py --host 0.0.0.0 --port 8765 --device cpu --preset nvidia_4spk_v21
+   ```
+
+   Open `http://localhost:8765/`.
+
+## Repository layout
+
+- **No sibling NeMo source tree is required.** Post-processing defaults ship in `conf/post_processing/sortformer_diar_4spk-v1_dihard3-dev.yaml`. If you also keep a `NeMo` folder next to this repo, that file is used only when the bundled copy is missing.
+- `server.py` still prepends a sibling `../NeMo` to `sys.path` when present (optional, for developers working from source).
+
+## Hugging Face models
 
 | preset            | Hugging Face ID |
 |-------------------|-----------------|
 | `ultra_8spk`      | `devsy0117/ultra_diar_streaming_sortformer_8spk_v1` |
 | `nvidia_4spk_v21` | `nvidia/diar_streaming_sortformer_4spk-v2.1` |
 
-## Run the server
+The **NVIDIA** preset is usually the easiest for a fresh clone (public checkpoint). The **ultra_8spk** preset must be **public** or your HF account must have access; otherwise use `--nemo` with a local `.nemo` file or another Hub id.
+
+## Server options
 
 ```bash
-cd diar_streaming_demo
 python server.py --host 0.0.0.0 --port 8765 --device cuda --preset ultra_8spk
 ```
 
-- **`--preset`**: initial model (`ultra_8spk`, `nvidia_4spk_v21`).
-- **`--nemo`**: override with a local `.nemo` path or HF `org/model` string **for the initial load only**; switching preset in the UI uses the registry path again.
-- **`--device`**: `cuda` or `cpu`. If the GPU driver and your PyTorch CUDA build do not match, use `python server.py --device cpu` (or `CUDA_VISIBLE_DEVICES=""` alone is not enough—the app still calls `.to("cuda")` unless you pass `--device cpu`).
-- **`--sample-rate`**: default `16000` (client also sends 16 kHz mono).
-- **`--spkcache-len`**, **`--no-aux`**: advanced flags (`server.py -h`).
+- **`--preset`**: `ultra_8spk`, `nvidia_4spk_v21`.
+- **`--nemo`**: local `.nemo` or `org/model` for the **initial** load only; the UI preset switch uses registry IDs again.
+- **`--device`**: `cuda` or `cpu`. `CUDA_VISIBLE_DEVICES=""` alone does not switch this app off CUDA—you still need `--device cpu` if CUDA init fails.
+- **`--sample-rate`**: default `16000`.
+- **`--spkcache-len`**, **`--no-aux`**: see `python server.py -h`.
 
-Open `http://<host>:8765/` in a browser.
+## Temporary directory (`TMPDIR`)
+
+Unpacking Hub checkpoints can need a large temp directory. On this demo image, if `/mnt/data` exists, the server sets `TMPDIR=/mnt/data/tmp/diar_streaming_demo` automatically. Elsewhere:
+
+```bash
+export TMPDIR=/path/to/large/tmp
+```
 
 ## Browser (microphone)
 
-- **Chrome / Edge** recommended; grant microphone permission.
-- **Non-HTTPS** access from a raw IP (not `localhost`) may block `getUserMedia`. Use TLS behind a reverse proxy or an SSH tunnel to localhost.
-- **Start microphone** streams PCM over the WebSocket and updates the live / running heatmaps and segment log. **Reset state** clears server-side streaming state only.
+- **Chrome / Edge** recommended; allow the microphone.
+- Raw **HTTP + non-localhost IP** often blocks `getUserMedia` — use HTTPS, `localhost`, or an SSH tunnel.
 
 ## API summary
 
-- `GET /` — demo UI (`static/index.html`)
-- `GET /api/models` — model list, current channel count, heatmap parameters
-- `WebSocket /ws` — binary: 16-bit PCM mono 16 kHz chunks; text JSON: `{"cmd":"reset"}`, `{"cmd":"set_model","id":"<preset>"}`
+- `GET /` — UI (`static/index.html`)
+- `GET /api/models` — models, channel count, heatmap parameters
+- `WebSocket /ws` — binary PCM; JSON `{"cmd":"reset"}`, `{"cmd":"set_model","id":"<preset>"}`
 
 ## Troubleshooting
 
-- **Download failures**: check HF login/token, network, and disk (cache + `TMPDIR`).
-- **CUDA OOM**: try `--device cpu` or a smaller preset.
-- **NeMo import errors**: verify install path and `PYTHONPATH` for your environment.
+- **`pip install nemo_toolkit` fails or imports break** — install the matching **torch** build first; check Python version against [NeMo docs](https://docs.nvidia.com/deeplearning/nemo/user-guide/docs/en/stable/).
+- **Checkpoint download errors** — `hf login`, `HF_TOKEN`, network, and free disk (cache + `TMPDIR`).
+- **CUDA errors / OOM** — `python server.py --device cpu` or a smaller preset.
+- **403 / model not found** — use `nvidia_4spk_v21`, or your own `--nemo` checkpoint with Hub access fixed.

@@ -24,9 +24,13 @@ from nemo.collections.asr.parts.utils.vad_utils import PostProcessingParams, ts_
 #   — per spk: ts_vad_post_processing(..., unit_10ms_frame_count=subsampling_factor)
 #   — then generate_diarization_output_lines → merge_float_intervals per speaker (not across speakers).
 
-# NeMo example: DIHARD3 dev–tuned post-processing (sortformer_diar_4spk-v1)
-_DEFAULT_POSTPROCESSING_YAML = (
-    Path(__file__).resolve().parent.parent
+# Post-processing YAML: bundled in this repo first; else sibling NeMo checkout (dev).
+_DEMO_ROOT = Path(__file__).resolve().parent
+_BUNDLED_POSTPROCESSING_YAML = (
+    _DEMO_ROOT / "conf" / "post_processing" / "sortformer_diar_4spk-v1_dihard3-dev.yaml"
+)
+_NEMO_SIBLING_POSTPROCESSING_YAML = (
+    _DEMO_ROOT.parent
     / "NeMo"
     / "examples"
     / "speaker_tasks"
@@ -35,6 +39,12 @@ _DEFAULT_POSTPROCESSING_YAML = (
     / "post_processing"
     / "sortformer_diar_4spk-v1_dihard3-dev.yaml"
 )
+
+
+def default_postprocessing_yaml_path() -> Path:
+    if _BUNDLED_POSTPROCESSING_YAML.is_file():
+        return _BUNDLED_POSTPROCESSING_YAML
+    return _NEMO_SIBLING_POSTPROCESSING_YAML
 
 
 def _load_nemo_postprocessing_yaml(path: Path) -> dict[str, Any] | None:
@@ -185,7 +195,7 @@ class Ultra8StreamingDiar:
         pad_offset = 0.0
         min_duration_on = 0.0
         min_duration_off = 0.0
-        pp_yaml = _load_nemo_postprocessing_yaml(_DEFAULT_POSTPROCESSING_YAML)
+        pp_yaml = _load_nemo_postprocessing_yaml(default_postprocessing_yaml_path())
         if pp_yaml is not None:
             vad_onset = float(pp_yaml.get("onset", vad_onset))
             vad_offset = float(pp_yaml.get("offset", vad_offset))
@@ -224,6 +234,7 @@ class Ultra8StreamingDiar:
                 except (TypeError, ValueError, AttributeError):
                     pass
 
+        pp_path = default_postprocessing_yaml_path()
         out: Dict[str, Any] = {
             "sil_threshold": float(getattr(sm, "sil_threshold", 0.2)),
             "vad_onset": vad_onset,
@@ -232,9 +243,7 @@ class Ultra8StreamingDiar:
             "pad_offset": pad_offset,
             "min_duration_on": min_duration_on,
             "min_duration_off": min_duration_off,
-            "postprocessing_yaml": str(_DEFAULT_POSTPROCESSING_YAML)
-            if _DEFAULT_POSTPROCESSING_YAML.is_file()
-            else None,
+            "postprocessing_yaml": str(pp_path) if pp_path.is_file() else None,
             "viz_rule": "per_channel_hysteresis_onset_offset",
         }
         if hasattr(sm, "n_base_spks"):
