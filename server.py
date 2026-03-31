@@ -291,6 +291,8 @@ async def ws_audio(ws: WebSocket):
             async with diar_lock:
                 d = get_diar()
                 probs, aux = d.diarize(raw)
+            aux = dict(aux)
+            postproc_log = aux.pop("postproc_log", None)
             n_spk = int(probs.shape[1]) if probs.size else int(d.max_num_speakers)
             out: dict[str, Any] = {
                 "type": "probs",
@@ -300,6 +302,8 @@ async def ws_audio(ws: WebSocket):
                 "shape": [int(probs.shape[0]), n_spk],
                 "data": probs.tolist(),
             }
+            if postproc_log is not None:
+                out["postproc_log"] = postproc_log
             if aux:
                 out["aux"] = aux
             await ws.send_json(out)

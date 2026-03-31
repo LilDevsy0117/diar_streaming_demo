@@ -114,11 +114,11 @@
     <div class="grid">
       <div class="card viz">
         <div>
-          <div class="sub" style="margin-bottom:6px;">Live probabilities (recent window)</div>
+          <div class="sub" style="margin-bottom:6px;">Live heatmap · time → · rows = speakers</div>
           <canvas id="canvasLive" width="1100" height="220"></canvas>
         </div>
         <div>
-          <div class="sub" style="margin-bottom:6px;">Running heatmap</div>
+          <div class="sub" style="margin-bottom:6px;">Running heatmap · time → · rows = speakers</div>
           <canvas id="canvasAccum" width="1100" height="220"></canvas>
         </div>
         <div class="legend" id="legend"></div>
@@ -163,6 +163,57 @@
       "#6ea8fe", "#3dd68c", "#ffd166", "#ff6b6b", "#c77dff",
       "#00d4ff", "#ffb4a2", "#a8dadc", "#e9c46a", "#2a9d8f"
     ];
+
+    const HEAT_BG = { r: 7, g: 10, b: 16 };
+
+    function hexToRgb(hex) {
+      const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+      return m
+        ? { r: parseInt(m[1], 16), g: parseInt(m[2], 16), b: parseInt(m[3], 16) }
+        : { r: 110, g: 168, b: 254 };
+    }
+
+    /** Classic 2D heatmap: x = time (columns), y = speaker bands (rows), intensity = probability. */
+    function drawHeatmap(ctx, canvas, cols, n, _opts) {
+      const W = canvas.width;
+      const H = canvas.height;
+      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = "#070a10";
+      ctx.fillRect(0, 0, W, H);
+      if (!cols.length || n < 1) return;
+
+      const T = cols.length;
+      const cellW = W / T;
+      const rowH = H / n;
+      const gap = 1;
+
+      for (let t = 0; t < T; t++) {
+        const col = cols[t];
+        const x0 = t * cellW;
+        const cw = Math.max(1, cellW - 0.25);
+        for (let s = 0; s < n; s++) {
+          const v = Math.max(0, Math.min(1, col[s] || 0));
+          const y0 = s * rowH;
+          const rh = Math.max(1, rowH - gap);
+          const { r: pr, g: pg, b: pb } = hexToRgb(SPK_COLORS[s % SPK_COLORS.length]);
+          const r = HEAT_BG.r + (pr - HEAT_BG.r) * v;
+          const g = HEAT_BG.g + (pg - HEAT_BG.g) * v;
+          const b = HEAT_BG.b + (pb - HEAT_BG.b) * v;
+          ctx.fillStyle = `rgb(${r | 0},${g | 0},${b | 0})`;
+          ctx.fillRect(x0, y0, cw, rh);
+        }
+      }
+
+      ctx.strokeStyle = "rgba(255,255,255,0.06)";
+      ctx.lineWidth = 1;
+      for (let s = 1; s < n; s++) {
+        const y = s * rowH;
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(W, y);
+        ctx.stroke();
+      }
+    }
 
     function setWsStatus(text, ok) {
       wsStatus.textContent = "WS: " + text;
@@ -219,30 +270,6 @@
       drawHeatmap(ctxAccum, canvasAccum, [], nSpk, { mode: "accum" });
     }
 
-    function drawHeatmap(ctx, canvas, cols, n, opts) {
-      const W = canvas.width, H = canvas.height;
-      ctx.clearRect(0, 0, W, H);
-      if (!cols.length) {
-        ctx.fillStyle = "#070a10";
-        ctx.fillRect(0, 0, W, H);
-        return;
-      }
-      const fw = W / cols.length;
-      for (let x = 0; x < cols.length; x++) {
-        const col = cols[x];
-        let y0 = H;
-        for (let s = 0; s < n; s++) {
-          const v = Math.max(0, Math.min(1, col[s] || 0));
-          const h = v * H * 0.92;
-          ctx.fillStyle = SPK_COLORS[s % SPK_COLORS.length];
-          ctx.globalAlpha = 0.35 + v * 0.55;
-          ctx.fillRect(x * fw, y0 - h, Math.max(1, fw - 0.5), h);
-          y0 -= h;
-        }
-      }
-      ctx.globalAlpha = 1;
-    }
-
     let liveCols = [];
     const LIVE_MAX = 120;
 
@@ -259,36 +286,42 @@
       drawHeatmap(ctxAccum, canvasAccum, accumCols, nSpk, { mode: "accum" });
     }
 
+    /** Cumulative audio time for heatmap column alignment (matches PCM chunks). */
     let lastSegT = 0;
-    let lastWinner = -1;
+
+    function appendSegmentLogFromServer(entries) {
+      if (!entries || !entries.length) return;
+      for (const ev of entries) {
+        const line = document.createElement("div");
+        line.className = "line";
+        if (ev.start != null && ev.end != null) {
+          line.innerHTML = `<span class="t">${Number(ev.start).toFixed(2)}s : ${Number(ev.end).toFixed(2)}s</span>  spk${ev.spk}`;
+        } else if (ev.t != null) {
+          line.innerHTML = `<span class="t">${Number(ev.t).toFixed(2)}s</span>  spk${ev.spk}  p=${Number(ev.p).toFixed(3)}`;
+        }
+        streamChat.appendChild(line);
+      }
+      streamChat.scrollTop = streamChat.scrollHeight;
+    }
 
     function handleProbs(msg) {
       const data = msg.data;
       if (!data || !data.length) return;
-      const frameLen = msg.frame_len_sec || 0.08;
       const rows = data;
-      for (let r = 0; r < rows.length; r++) {
-        const row = rows[r];
-        pushLiveCol(row);
-        pushAccumCol(row);
-        const t = lastSegT + frameLen;
-        lastSegT = t;
-        let best = 0, bi = 0;
-        for (let s = 0; s < nSpk; s++) {
-          const v = row[s] || 0;
-          if (v > best) { best = v; bi = s; }
-        }
-        const active = best >= silThreshold;
-        if (active && bi !== lastWinner) {
-          lastWinner = bi;
-          const line = document.createElement("div");
-          line.className = "line";
-          line.innerHTML = `<span class="t">${t.toFixed(2)}s</span>  spk${bi}  p=${best.toFixed(3)}`;
-          streamChat.appendChild(line);
-          streamChat.scrollTop = streamChat.scrollHeight;
-        }
-        if (!active) lastWinner = -1;
+      const n = rows.length;
+      const frameLen = msg.frame_len_sec || 0.08;
+      const chunkDur =
+        typeof msg.audio_duration_sec === "number" && msg.audio_duration_sec > 0
+          ? msg.audio_duration_sec
+          : n * frameLen;
+      const chunkStart = lastSegT;
+      for (let r = 0; r < n; r++) {
+        pushLiveCol(rows[r]);
+        pushAccumCol(rows[r]);
       }
+      lastSegT = chunkStart + chunkDur;
+
+      appendSegmentLogFromServer(msg.postproc_log);
     }
 
     async function loadModelList() {
@@ -395,7 +428,6 @@
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ cmd: "reset" }));
         lastSegT = 0;
-        lastWinner = -1;
         liveCols = [];
         clearAccum();
         streamChat.innerHTML = "";

@@ -6,15 +6,23 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+from omegaconf import OmegaConf
 from torch import Tensor
 
 from cache_feature_bufferer import CacheFeatureBufferer
 from nemo.collections.asr.models import SortformerEncLabelModel
 from nemo.collections.asr.modules.sortformer_modules import StreamingSortformerState
+from nemo.collections.asr.parts.utils.speaker_utils import merge_float_intervals
+from nemo.collections.asr.parts.utils.vad_utils import PostProcessingParams, ts_vad_post_processing
+
+# RTTM / pred_rttm parity reference (offline Sortformer):
+#   nemo/collections/asr/models/sortformer_diar_models.py::_diarize_output_processing
+#   — per spk: ts_vad_post_processing(..., unit_10ms_frame_count=subsampling_factor)
+#   — then generate_diarization_output_lines → merge_float_intervals per speaker (not across speakers).
 
 # NeMo example: DIHARD3 dev–tuned post-processing (sortformer_diar_4spk-v1)
 _DEFAULT_POSTPROCESSING_YAML = (
@@ -146,6 +154,23 @@ class Ultra8StreamingDiar:
         )
         self.streaming_state = self.init_streaming_state(batch_size=1)
         self.total_preds = torch.zeros((1, 0, self.max_num_speakers), device=self.diarizer.device)
+
+        hp = self.get_heatmap_params()
+        self._pp_omega = OmegaConf.structured(
+            PostProcessingParams(
+                onset=float(hp["vad_onset"]),
+                offset=float(hp["vad_offset"]),
+                pad_onset=float(hp["pad_onset"]),
+                pad_offset=float(hp["pad_offset"]),
+                min_duration_on=float(hp["min_duration_on"]),
+                min_duration_off=float(hp["min_duration_off"]),
+            )
+        )
+        self._pp_subsampling = int(getattr(self.diarizer.encoder, "subsampling_factor", 8))
+        #: Wall-clock seconds of PCM fed into diarize (16 kHz mono int16 chunks).
+        self._cumulative_audio_sec = 0.0
+        #: Finalized post-processed segments already logged (spk, neural_start, neural_end) rounded.
+        self._pp_logged_segment_keys: set[tuple[int, float, float]] = set()
 
     def get_heatmap_params(self) -> Dict[str, Any]:
         """
@@ -377,6 +402,74 @@ class Ultra8StreamingDiar:
         self.feature_bufferer.reset()
         self.streaming_state = self.init_streaming_state(batch_size=1)
         self.total_preds = torch.zeros((1, 0, self.max_num_speakers), device=self.diarizer.device)
+        self._cumulative_audio_sec = 0.0
+        self._pp_logged_segment_keys.clear()
+
+    def _neural_time_to_wall_sec(self, t_neural: float) -> float:
+        """Map NeMo postproc timeline (seconds) to wall time using PCM vs model-frame span."""
+        tlen = int(self.total_preds.shape[1])
+        fl = float(self.frame_len_in_secs)
+        neural_span = max(tlen * fl, 1e-9)
+        audio_sec = float(self._cumulative_audio_sec)
+        w = float(t_neural) * (audio_sec / neural_span)
+        return max(0.0, min(w, audio_sec))
+
+    def pop_postproc_segment_log_events(self) -> List[Dict[str, Any]]:
+        """
+        Same core post-processing as NeMo pred_rttm for Sortformer (per-speaker ts_vad_post_processing
+        + per-speaker merge_float_intervals). See module docstring for file/line reference.
+
+        Differences vs offline pred_rttm: (1) preds are streaming-accumulated total_preds, not a single
+        full-file forward — values can differ from offline diarize() on the same wav. (2) Wall-time
+        scaling maps neural seconds to cumulative PCM length. (3) Trailing margin defers segments
+        still inside the lookahead window. (4) Output is JSON log lines, not RTTM strings.
+        """
+        tp = self.total_preds[0]
+        tlen = int(tp.shape[0])
+        out: List[Dict[str, Any]] = []
+        if tlen == 0:
+            return out
+        fl = float(self.frame_len_in_secs)
+        neural_span = tlen * fl
+        margin = max(3.0 * fl, 0.24)
+        cutoff = neural_span - margin
+
+        for j in range(int(tp.shape[1])):
+            col = tp[:, j].detach().float().cpu()
+            segs = ts_vad_post_processing(
+                col,
+                self._pp_omega,
+                unit_10ms_frame_count=self._pp_subsampling,
+                bypass_postprocessing=False,
+            )
+            if segs is None or segs.numel() == 0:
+                continue
+            arr = segs.detach().cpu().numpy()
+            raw: List[List[float]] = []
+            for k in range(arr.shape[0]):
+                s0_n = float(arr[k, 0])
+                s1_n = float(arr[k, 1])
+                if s1_n > cutoff:
+                    continue
+                raw.append([round(s0_n, 2), round(s1_n, 2)])
+            if not raw:
+                continue
+            merged = merge_float_intervals(raw)
+            for s0_n, s1_n in merged:
+                if s1_n > cutoff:
+                    continue
+                key = (j, round(float(s0_n), 2), round(float(s1_n), 2))
+                if key in self._pp_logged_segment_keys:
+                    continue
+                self._pp_logged_segment_keys.add(key)
+                w0 = self._neural_time_to_wall_sec(s0_n)
+                w1 = self._neural_time_to_wall_sec(s1_n)
+                if w1 < w0:
+                    w0, w1 = w1, w0
+                out.append({"start": w0, "end": w1, "spk": j})
+
+        out.sort(key=lambda e: (e["start"], e["spk"]))
+        return out
 
     def _aux_mel(self, features: Tensor) -> Dict[str, Any]:
         """features: (F, T) log-mel, etc."""
@@ -396,6 +489,7 @@ class Ultra8StreamingDiar:
         }
 
     def diarize(self, audio: bytes, stream_id: str = "default") -> Tuple[np.ndarray, Dict[str, Any]]:
+        self._cumulative_audio_sec += (len(audio) / 2) / 16000.0
         audio_array = np.frombuffer(audio, dtype=np.int16).astype(np.float32) / 32768.0
         self.feature_bufferer.update(audio_array)
 
@@ -421,6 +515,10 @@ class Ultra8StreamingDiar:
             aux.update(aux_step)
 
         new_len = int(self.total_preds.shape[1])
+        if new_len > prev_len:
+            log_events = self.pop_postproc_segment_log_events()
+            if log_events:
+                aux["postproc_log"] = log_events
         # If we only slice the last chunk_size every call, responses overlap heavily with the previous
         # step and the heatmap looks broken or repeats. Return only newly produced frames.
         if new_len <= prev_len:

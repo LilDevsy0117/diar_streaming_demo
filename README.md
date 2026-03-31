@@ -2,6 +2,12 @@
 
 Browser microphone → WebSocket → NeMo Sortformer streaming diarization. **There is no YouTube or sample-WAV playback path.**
 
+## Screenshot
+
+![Demo UI: live / running heatmaps, post-processed segment log, model and mic controls](assets/streaming_diar_demo.png)
+
+The **segment log** (right) lists finalized speech intervals per speaker as `start : end` (seconds), using the same per-channel `ts_vad_post_processing` + merge step as NeMo Sortformer RTTM-style output (see `demo_service.py` comments). Heatmaps show raw streaming probabilities.
+
 ## Prerequisites
 
 1. **Repository layout**  
@@ -45,7 +51,7 @@ python server.py --host 0.0.0.0 --port 8765 --device cuda --preset ultra_8spk
 
 - **`--preset`**: initial model (`ultra_8spk`, `nvidia_4spk_v21`).
 - **`--nemo`**: override with a local `.nemo` path or HF `org/model` string **for the initial load only**; switching preset in the UI uses the registry path again.
-- **`--device`**: `cuda` or `cpu`.
+- **`--device`**: `cuda` or `cpu`. If the GPU driver and your PyTorch CUDA build do not match, use `python server.py --device cpu` (or `CUDA_VISIBLE_DEVICES=""` alone is not enough—the app still calls `.to("cuda")` unless you pass `--device cpu`).
 - **`--sample-rate`**: default `16000` (client also sends 16 kHz mono).
 - **`--spkcache-len`**, **`--no-aux`**: advanced flags (`server.py -h`).
 
