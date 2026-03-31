@@ -8,12 +8,14 @@ Mic → WebSocket → NeMo Sortformer streaming diarization (browser UI).
 
 1. Install [PyTorch](https://pytorch.org/get-started/locally/) (CPU or CUDA) **before** NeMo.
 2. `pip install -r requirements.txt`
-3. `huggingface-cli login` (or `HF_TOKEN`) — models load from the Hub.
+3. `hf auth login` (or set `HF_TOKEN`) — checkpoints download from the Hub.
 
 ## Run
+
+`--preset` picks the **startup model** from the server registry (`ultra_8spk` = 8-ch HF model, `nvidia_4spk_v21` = NVIDIA 4-ch). You can switch in the browser later.
 
 ```bash
 python server.py --device cpu --preset nvidia_4spk_v21
 ```
 
-Open `http://localhost:8765/`. No GPU or CUDA errors → try `--device cpu`. Other options → `python server.py -h`.
+Open `http://localhost:8765/`. GPU / CUDA issues → `--device cpu`. More flags → `python server.py -h`.
