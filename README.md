@@ -12,10 +12,6 @@ Mic → WebSocket → NeMo Sortformer streaming diarization (browser UI).
 
 ## Run
 
-`--preset` picks the **startup model** from the server registry (`ultra_8spk` = 8-ch HF model, `nvidia_4spk_v21` = NVIDIA 4-ch). You can switch in the browser later.
-
 ```bash
-python server.py --device cpu --preset nvidia_4spk_v21
+python server.py --device cpu
 ```
-
-Open `http://localhost:8765/`. GPU / CUDA issues → `--device cpu`. More flags → `python server.py -h`.

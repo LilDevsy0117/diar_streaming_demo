@@ -48,7 +48,9 @@ app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
 diar: Ultra8StreamingDiar | None = None
 diar_lock = asyncio.Lock()
-current_preset_id: str = "ultra_8spk"
+# Registry key for the model loaded at startup (no CLI flag — change default here if needed).
+DEFAULT_STARTUP_MODEL_ID: str = "ultra_8spk"
+current_model_id: str = DEFAULT_STARTUP_MODEL_ID
 
 STREAM_PRESET_4SPK_VOICE_AGENT: dict = {
     "chunk_len": 6,
@@ -75,7 +77,7 @@ MODEL_REGISTRY: dict[str, dict] = {
 
 
 def make_config(
-    preset_id: str,
+    model_id: str,
     device: str,
     path_override: str | None = None,
     spkcache_override: int | None = None,
@@ -83,9 +85,9 @@ def make_config(
     return_aux: bool = True,
     aux_pre_encode: bool = False,
 ) -> StreamingDiarDemoConfig:
-    if preset_id not in MODEL_REGISTRY:
-        raise ValueError(f"unknown preset: {preset_id}")
-    r = MODEL_REGISTRY[preset_id]
+    if model_id not in MODEL_REGISTRY:
+        raise ValueError(f"unknown model: {model_id}")
+    r = MODEL_REGISTRY[model_id]
     path = str(Path(path_override)) if path_override else str(r["path"])
     spkcache_len = r.get("spkcache_len")
     if spkcache_override is not None:
@@ -104,11 +106,11 @@ def make_config(
     )
 
 
-async def load_diar(preset_id: str, device: str, path_override: str | None = None) -> Ultra8StreamingDiar:
-    global diar, current_preset_id
+async def load_diar(model_id: str, device: str, path_override: str | None = None) -> Ultra8StreamingDiar:
+    global diar, current_model_id
     args = get_cli_args()
     cfg = make_config(
-        preset_id,
+        model_id,
         device,
         path_override=path_override,
         spkcache_override=args.spkcache_len,
@@ -119,7 +121,7 @@ async def load_diar(preset_id: str, device: str, path_override: str | None = Non
     async with diar_lock:
         old = diar
         diar = new_diar
-        current_preset_id = preset_id
+        current_model_id = model_id
         del old
     gc.collect()
     try:
@@ -141,15 +143,9 @@ def get_diar() -> Ultra8StreamingDiar:
 def make_cli_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument(
-        "--preset",
-        default="ultra_8spk",
-        choices=list(MODEL_REGISTRY.keys()),
-        help="Initial model preset to load",
-    )
-    p.add_argument(
         "--nemo",
         default=None,
-        help="Override with local .nemo path or HF org/model id",
+        help="Override checkpoint: local .nemo path or HF org/model (applies to initial load only; UI switches use registry paths)",
     )
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=8765)
@@ -189,12 +185,12 @@ def get_cli_args():
 
 @app.on_event("startup")
 async def _startup():
-    global diar, current_preset_id
+    global diar, current_model_id
     if getattr(app.state, "cli_args", None) is None:
         app.state.cli_args = default_cli_args()
     args = app.state.cli_args
     cfg = make_config(
-        args.preset,
+        DEFAULT_STARTUP_MODEL_ID,
         args.device,
         path_override=args.nemo,
         spkcache_override=getattr(args, "spkcache_len", None),
@@ -202,7 +198,7 @@ async def _startup():
         aux_pre_encode=getattr(args, "aux_pre_encode", False),
     )
     diar = Ultra8StreamingDiar(cfg, sample_rate=args.sample_rate)
-    current_preset_id = args.preset
+    current_model_id = DEFAULT_STARTUP_MODEL_ID
 
 
 @app.get("/")
@@ -230,7 +226,7 @@ async def api_models():
     vad_offset = float(heatmap_params["vad_offset"]) if heatmap_params else 0.5
     return {
         "models": out,
-        "current_id": current_preset_id,
+        "current_id": current_model_id,
         "current_n_spk": n_spk,
         "sil_threshold": sil_threshold,
         "vad_onset": vad_onset,
